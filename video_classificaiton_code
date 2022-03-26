@@ -1,0 +1,149 @@
+import numpy as np
+import os
+import cv2
+import tensorflow
+import pandas as pd
+from imutils import paths
+datafilepath= "/content/DataSet ISRO"
+epoch= 50
+
+from sklearn.preprocessing import LabelBinarizer
+from sklearn.model_selection import train_test_split as tts
+
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+
+outputmodel= "/content/output_file/videoclassificationmodel"
+outputlabelbinarizer= "/content/output_file/videoclassificationbinarizer"
+
+missionlabels=set(['Launch','Outdoor Shots','Public shots'])
+print("Images is being loaded...")
+pathToImages= list(paths.list_images(datafilepath))
+data=[]
+labels=[]
+
+for images in pathToImages:
+  label= images.split(os.path.sep)[-2]
+  if label not in missionlabels:
+    continue
+  image= cv2.imread(images)
+  image= cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+  image= cv2.resize(image,(224,224))
+  data.append(image)
+  labels.append(label)
+
+data= np.array(data)
+labels= np.array(labels)
+
+lb= LabelBinarizer()
+labels= lb.fit_transform(labels)
+
+(x_train,x_test,y_train,y_test)= tts(data, labels, test_size=0.25, stratify= labels, random_state= 42)
+
+trainAug= ImageDataGenerator(
+    rotation_range= 30,
+    zoom_range= 0.15,
+    width_shift_range= 0.2,
+    height_shift_range= 0.2,
+    shear_range= 0.15,
+    horizontal_flip= True,
+    fill_mode= "nearest"
+)
+
+validAug= ImageDataGenerator()
+mean= np.array([123.68,116.779,103.939],dtype= "float32")
+trainAug.mean= mean
+validAug.mean= mean
+
+from tensorflow import keras as k
+
+from keras.layers import Input
+from keras.layers.pooling import AveragePooling2D
+from keras.applications.resnet import ResNet50
+from keras.layers.core import Flatten
+from keras.layers.core import Dense
+
+from keras.layers.core import Dropout
+from keras.models import Model
+
+baseModel= ResNet50(weights= "imagenet", include_top= False, input_tensor=Input(shape=(224,244,3)))
+headModel= baseModel.output
+headModel= AveragePooling2D(pool_size=(7,7))(headModel)
+headModel= Flatten(name= "flatten")(headModel)
+headModel= Dense(512, activation= "relu")(headModel)
+headModel= Dropout(0.5)(headModel)
+headModel= Dense(len(lb.classes_),activation="softmax")(headModel)
+model= Model(inputs= baseModel.inputs, outputs= headModel)
+for bml in baseModel.layers:
+  bml.trainable= False
+
+from tensorflow.keras.optimizers import SGD
+
+opt= SGD(lr= 0.0001, momentum= 0.9, decay= 1e-4/epoch)
+
+model.compile(loss= "categorical_crossentropy", optimizer= opt, metrics= ["accuracy"])
+
+History= model.fit_generator(
+    trainAug.flow(x_train,y_train,batch_size=32),
+    steps_per_epoch=len(x_train)//32,
+    validation_data=validAug.flow(x_test,y_test),
+    validation_steps= len(x_test)//32,
+    epochs= epoch)
+    
+    
+    import pickle
+
+model.save(outputmodel)
+lbinarizer= open("/content/output_file/videoclassificationbinarizer.pickle","wb")
+lbinarizer.write(pickle.dumps(lb))
+lbinarizer.close()
+
+from keras.models import load_model
+from collections import deque
+from google.colab.patches import cv2_imshow
+
+model= load_model("/content/output_file/videoclassificationmodel")
+lb= pickle.loads(open("/content/output_file/videoclassificationbinarizer.pickle","rb").read())
+outputvideo= "/content/output_file/test_output.avi"
+mean= np.array([123.68,116.779,103.939][::1],dtype="float32")
+Queue= deque(maxlen=128)
+
+print(lb.classes_)
+
+missionlist=['Launch','Outdoor Shots','Public shots']
+
+capture_video= cv2.VideoCapture("/content/test_file/test_video.mp4")
+writer= None
+(Width, Height)= (None,None)
+
+while True:
+  (taken,frame)= capture_video.read()
+  if not taken:
+    break
+  if Width is None or Height is None:
+    (Width,Height)= frame.shape[:2]
+  output= frame.copy()
+  frame= cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+  frame= cv2.resize(frame, (244,224)).astype("float32")
+  frame-= mean
+  preds= model.predict(np.expand_dims(frame,axis=0))[0]
+  print(preds)
+  results= np.array(Queue).mean(axis= 0)
+  i= np.argmax(preds)
+  label= missionlist[i]
+  text= "Video: {}".format(label)
+  cv2.putText(output,text, (45,60),cv2.FONT_HERSHEY_SIMPLEX,1.25,(0,0,0),thickness= 3)
+
+  if writer is None:
+    fourcc= cv2.VideoWriter_fourcc(*"MJPG")
+    writer= cv2.VideoWriter("outputvideo",fourcc,30,(Width, Height),True)
+    
+  writer.write(output)
+  cv2_imshow(output)
+  key= cv2.waitKey(1)& 0xFF
+
+  if key== ord("q"):
+    break
+
+print("Finalizing...")
+writer.release()
+capture_video.release()
